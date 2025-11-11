@@ -2583,19 +2583,22 @@
     </div>
 
     <!-- Checkout Modal -->
-    <div id="checkoutModal" class="modal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h3 class="modal-title">Complete Sale</h3>
-                <button class="modal-close js-modal-close" data-target="checkoutModal">&times;</button>
-            </div>
+<div id="checkoutModal" class="modal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3 class="modal-title">Complete Sale</h3>
+            <button class="modal-close js-modal-close" data-target="checkoutModal">&times;</button>
+        </div>
+        <!-- FIX: Added the <form> tag with id="checkoutForm" -->
+        <form id="checkoutForm">
             <div class="modal-body">
                 <div id="checkout-summary">
                     <!-- Checkout summary will be loaded here -->
                 </div>
                 <div class="form-group">
                     <label class="form-label" for="paymentMethod">Payment Method</label>
-                    <select class="form-input" id="paymentMethod" autocomplete="off">
+                    <select class="form-input" id="paymentMethod" autocomplete="off" required>
+                        <option value="">Select Payment Method</option>
                         <option value="cash">Cash</option>
                         <option value="card">Card</option>
                         <option value="transfer">Bank Transfer</option>
@@ -2611,12 +2614,13 @@
                 </div>
             </div>
             <div class="modal-footer">
-                <button class="btn btn-secondary js-modal-close" data-target="checkoutModal">Cancel</button>
-                <button class="btn btn-primary js-complete-checkout-btn">Complete Sale</button>
+                <button type="button" class="btn btn-secondary js-modal-close" data-target="checkoutModal">Cancel</button>
+                <button type="button" class="btn btn-primary js-complete-checkout-btn">Complete Sale</button>
             </div>
-        </div>
+        </form>
+        <!-- END OF FIX -->
     </div>
-
+</div>
     <!-- Forgot Password Modal -->
     <div id="forgotPasswordModal" class="modal">
         <div class="modal-content">
