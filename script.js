@@ -1,7 +1,14 @@
 // Initialize Supabase
 const supabase = window.supabase.createClient(
   'https://qgayglybnnrhobcvftrs.supabase.co',
-  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFnYXlnbHlibm5yaG9iY3ZmdHJzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjI2ODQ5ODMsImV4cCI6MjA3ODI2MDk4M30.dqiEe-v1cro5N4tuawu7Y1x5klSyjINsLHd9-V40QjQ'
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFnYXlnbHlibm5yaG9iY3ZmdHJzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjI2ODQ5ODMsImV4cCI6MjA3ODI2MDk4M30.dqiEe-v1cro5N4tuawu7Y1x5klSyjINsLHd9-V40QjQ',
+  {
+    auth: {
+      persistSession: true,
+      autoRefreshToken: true,
+      detectSessionInUrl: true
+    }
+  }
 );
 
 // App configuration
@@ -39,14 +46,24 @@ let currentSection = 'grill';
 let currentView = 'pos';
 let currentFilter = 'all';
 let currentUser = null;
+let isOnline = navigator.onLine;
+let authRetryCount = 0;
+const MAX_AUTH_RETRIES = 3;
 
 // Utility functions
 const utils = {
   generateOfflineId: () => 'offline_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9),
 
   saveToLocalStorage: (key, data) => {
-    try { localStorage.setItem(key, JSON.stringify(data)); }
-    catch (e) { console.error('Error saving to localStorage:', e); }
+    try { 
+      localStorage.setItem(key, JSON.stringify(data)); 
+    } catch (e) { 
+      console.error('Error saving to localStorage:', e); 
+      // Handle quota exceeded error
+      if (e.name === 'QuotaExceededError') {
+        utils.showNotification('Storage is full. Please clear some data.', 'error');
+      }
+    }
   },
 
   loadFromLocalStorage: (key, defaultValue = null) => {
@@ -107,14 +124,34 @@ const utils = {
       : { isValid: true };
   },
 
-  showNotification: (message, type = 'info') => {
+  showNotification: (message, type = 'info', duration = 3000) => {
     const notification = document.getElementById('notification');
     if (!notification) return;
 
     notification.textContent = message;
     notification.className = `notification ${type}`;
     notification.classList.add('show');
-    setTimeout(() => notification.classList.remove('show'), 3000);
+    setTimeout(() => notification.classList.remove('show'), duration);
+  },
+
+  handleNetworkError: (error, operation) => {
+    console.error(`Network error during ${operation}:`, error);
+    if (!navigator.onLine) {
+      utils.showNotification('You are offline. Please check your internet connection.', 'error');
+    } else {
+      utils.showNotification(`Network error during ${operation}. Please try again.`, 'error');
+    }
+  },
+
+  retryOperation: async (operation, maxRetries = 3, delay = 1000) => {
+    for (let i = 0; i < maxRetries; i++) {
+      try {
+        return await operation();
+      } catch (error) {
+        if (i === maxRetries - 1) throw error;
+        await new Promise(resolve => setTimeout(resolve, delay * (i + 1)));
+      }
+    }
   }
 };
 
@@ -134,10 +171,6 @@ const dataManager = {
     });
   },
 
-  // =============================================================================
-  // CRITICAL FIX: saveDataToSupabase function
-  // This function now strictly filters data to match the database schema.
-  // =============================================================================
   saveDataToSupabase: async (table, data, id = null) => {
     data.timestamp = new Date().toISOString();
     data.userId = currentUser ? currentUser.id : 'offline_user';
@@ -145,7 +178,7 @@ const dataManager = {
     const localKey = `${table}_${id || 'new'}`;
     utils.saveToLocalStorage(localKey, data);
 
-    // Update local data structures (this part remains the same)
+    // Update local data structures
     if (table === 'inventory') {
       if (!id) {
         id = utils.generateOfflineId();
@@ -271,36 +304,31 @@ const dataManager = {
       try {
         let dataForSupabase = { ...data };
         delete dataForSupabase.isOffline;
-        delete dataForSupabase.timestamp; // timestamp is not a DB column
-        delete dataForSupabase.userId;   // userId is not a DB column
+        delete dataForSupabase.timestamp;
+        delete dataForSupabase.userId;
 
         if (!id || id.startsWith('offline_')) {
           delete dataForSupabase.id;
         }
 
-        // --- Table-specific data cleaning: ONLY INCLUDE COLUMNS THAT EXIST IN YOUR DATABASE ---
+        // Table-specific data cleaning
         if (table === 'inventory') {
           const { section, name, price, cost, stock, expiry_date, description, status, created_by, created_at, updated_by, updated_at, deleted, deleted_at } = dataForSupabase;
           const cleanExpiryDate = expiry_date && expiry_date.trim() !== '' ? expiry_date : null;
           dataForSupabase = { section, name, price, cost, stock, expiry_date: cleanExpiryDate, description, status, created_by, created_at, updated_by, updated_at, deleted, deleted_at };
         } else if (table === 'sales') {
-          // FIX: Removed 'totalCost' as it's not a column in the DB.
           const { user_id, user_email, section, items, subtotal, total, totalProfit, payment_method, customer_name, customer_phone, timestamp } = dataForSupabase;
           dataForSupabase = { user_id, user_email, section, items, subtotal, total, totalProfit, payment_method, customer_name, customer_phone, timestamp };
         } else if (table === 'sales_data') {
-          // FIX: Removed 'dailySales' as it's not a column in the DB.
           const { id, totalSales, totalTransactions, topItem, dailyTransactions, profit } = dataForSupabase;
           dataForSupabase = { id, totalSales, totalTransactions, topItem, dailyTransactions, profit };
         } else if (table === 'user_data') {
-          // FIX: Removed 'userId' as it's not a column in the DB.
           const { id, transactions, sales, purchases } = dataForSupabase;
           dataForSupabase = { id, transactions, sales, purchases };
         } else if (table === 'purchase_orders') {
-          // FIX: Removed 'productName' as it's not a column in the DB.
           const { section, orderNumber, supplierId, supplierName, quantity, cost, total, orderDate, status, created_by, created_at, updated_by, updated_at, deleted, deleted_at, receivedDate } = dataForSupabase;
           dataForSupabase = { section, orderNumber, supplierId, supplierName, quantity, cost, total, orderDate, status, created_by, created_at, updated_by, updated_at, deleted, deleted_at, receivedDate };
         }
-        // --- END OF FIX ---
 
         let result;
         if (id && !id.startsWith('offline_')) {
@@ -384,10 +412,6 @@ const dataManager = {
     return items.reduce((sum, item) => sum + item.total, 0) - totalCost;
   },
 
-  // =============================================================================
-  // CRITICAL FIX: syncPendingChanges function
-  // This function also needs to filter data to match the database schema.
-  // =============================================================================
   syncPendingChanges: async () => {
     if (!navigator.onLine) return;
 
@@ -408,7 +432,7 @@ const dataManager = {
             delete dataForSupabase.timestamp;
             delete dataForSupabase.id;
 
-            // --- Table-specific data cleaning: ONLY INCLUDE COLUMNS THAT EXIST IN YOUR DATABASE ---
+            // Table-specific data cleaning
             if (table === 'inventory') {
               const { section, name, price, cost, stock, expiry_date, description, status, created_by, created_at, updated_by, updated_at, deleted, deleted_at } = dataForSupabase;
               const cleanExpiryDate = expiry_date && expiry_date.trim() !== '' ? expiry_date : null;
@@ -426,7 +450,6 @@ const dataManager = {
               const { section, orderNumber, supplierId, supplierName, quantity, cost, total, orderDate, status, created_by, created_at, updated_by, updated_at, deleted, deleted_at, receivedDate } = dataForSupabase;
               dataForSupabase = { section, orderNumber, supplierId, supplierName, quantity, cost, total, orderDate, status, created_by, created_at, updated_by, updated_at, deleted, deleted_at, receivedDate };
             }
-            // --- END OF FIX ---
 
             promises.push(
               supabase
@@ -435,7 +458,6 @@ const dataManager = {
                 .select()
                 .then(({ data: result, error }) => {
                   if (error) throw error;
-                  // Update local data with real ID logic here...
                   return result[0];
                 })
             );
@@ -450,7 +472,7 @@ const dataManager = {
             delete dataForSupabase.isOffline;
             delete dataForSupabase.timestamp;
 
-            // --- Table-specific data cleaning: ONLY INCLUDE COLUMNS THAT EXIST IN YOUR DATABASE ---
+            // Table-specific data cleaning
             if (table === 'inventory') {
               const { section, name, price, cost, stock, expiry_date, description, status, created_by, created_at, updated_by, updated_at, deleted, deleted_at } = dataForSupabase;
               const cleanExpiryDate = expiry_date && expiry_date.trim() !== '' ? expiry_date : null;
@@ -468,7 +490,6 @@ const dataManager = {
               const { section, orderNumber, supplierId, supplierName, quantity, cost, total, orderDate, status, created_by, created_at, updated_by, updated_at, deleted, deleted_at, receivedDate } = dataForSupabase;
               dataForSupabase = { section, orderNumber, supplierId, supplierName, quantity, cost, total, orderDate, status, created_by, created_at, updated_by, updated_at, deleted, deleted_at, receivedDate };
             }
-            // --- END OF FIX ---
 
             promises.push(
               supabase
@@ -745,6 +766,7 @@ const uiManager = {
   },
 
   handleOnlineStatus: () => {
+    isOnline = true;
     const offlineIndicator = document.getElementById('offlineIndicator');
     if (offlineIndicator) offlineIndicator.classList.remove('show');
     utils.showNotification('Connection restored. Syncing data...', 'info');
@@ -752,6 +774,7 @@ const uiManager = {
   },
 
   handleOfflineStatus: () => {
+    isOnline = false;
     const offlineIndicator = document.getElementById('offlineIndicator');
     if (offlineIndicator) offlineIndicator.classList.add('show');
     utils.showNotification('You\'re now offline. Changes will be saved locally.', 'warning');
@@ -1553,10 +1576,6 @@ const cartManager = {
     checkoutModal.classList.add('active');
   },
 
-  // =============================================================================
-  // CRITICAL FIX: completeCheckout function
-  // The saleRecord object is now created without the invalid 'totalCost' property.
-  // =============================================================================
   completeCheckout: () => {
     const checkoutModal = document.getElementById('checkoutModal');
     if (!checkoutModal) return;
@@ -1602,7 +1621,6 @@ const cartManager = {
 
     const totalProfit = subtotal - totalCost;
 
-    // FIX: The saleRecord object now only contains fields that exist in the 'sales' table.
     const saleRecord = {
       user_id: currentUser ? currentUser.id : 'offline_user',
       user_email: currentUser ? currentUser.email : 'offline@example.com',
@@ -1615,7 +1633,6 @@ const cartManager = {
       customer_name: document.getElementById('customerName').value,
       customer_phone: document.getElementById('customerPhone').value,
       timestamp: new Date().toISOString()
-      // NOTE: 'totalCost' is calculated on the fly for reports and is NOT stored here.
     };
 
     dataManager.saveDataToSupabase('sales', saleRecord).then(() => {
@@ -2040,7 +2057,6 @@ const purchaseOrderManager = {
     const total = cost * quantity;
     const orderNumber = `PO-${Date.now()}`;
 
-    // FIX: Removed productName field that doesn't exist in database
     const newPurchaseOrder = {
       section,
       orderNumber,
@@ -2168,23 +2184,95 @@ const purchaseOrderManager = {
 
 // Authentication
 const authManager = {
-  resetPassword: () => {
+  signIn: async (email, password) => {
+    const errorElement = document.getElementById('email-login-error');
+    const loginBtn = document.getElementById('emailLoginBtn');
+    
+    if (loginBtn) {
+      loginBtn.disabled = true;
+      loginBtn.textContent = 'Signing In...';
+    }
+    
+    try {
+      // Reset retry count on new attempt
+      authRetryCount = 0;
+      
+      const { data, error } = await utils.retryOperation(async () => {
+        return await supabase.auth.signInWithPassword({ email, password });
+      }, MAX_AUTH_RETRIES);
+      
+      if (error) {
+        throw error;
+      }
+      
+      if (data?.user) {
+        currentUser = data.user;
+        document.getElementById('loginScreen').style.display = 'none';
+        document.getElementById('mainApp').style.display = 'block';
+        uiManager.updateUserInfo(data.user);
+        dataManager.loadDataFromSupabase();
+        utils.showNotification('Login successful', 'success');
+      }
+      
+    } catch (error) {
+      console.error('Login error:', error);
+      let errorMessage = 'Login failed. Please try again.';
+      
+      if (error.message) {
+        if (error.message.includes('Invalid login credentials')) {
+          errorMessage = 'Invalid email or password';
+        } else if (error.message.includes('Failed to fetch') || error.message.includes('ERR_CONNECTION')) {
+          errorMessage = 'Network error. Please check your connection and try again.';
+        } else if (error.message.includes('SSL') || error.message.includes('certificate')) {
+          errorMessage = 'Security error. Please try again or contact support.';
+        } else {
+          errorMessage = error.message;
+        }
+      }
+      
+      if (errorElement) errorElement.textContent = errorMessage;
+    } finally {
+      if (loginBtn) {
+        loginBtn.disabled = false;
+        loginBtn.textContent = 'Sign In';
+      }
+    }
+  },
+  
+  resetPassword: async () => {
     const email = document.getElementById('resetEmail').value;
     const errorElement = document.getElementById('reset-password-error');
     const successElement = document.getElementById('reset-password-success');
-
-    supabase.auth.resetPasswordForEmail(email, {
-      redirectTo: window.location.origin
-    })
-      .then(({ data, error }) => {
-        if (error) {
-          if (errorElement) errorElement.textContent = error.message;
-          if (successElement) successElement.textContent = '';
+    
+    try {
+      const { data, error } = await utils.retryOperation(async () => {
+        return await supabase.auth.resetPasswordForEmail(email, {
+          redirectTo: window.location.origin
+        });
+      }, MAX_AUTH_RETRIES);
+      
+      if (error) {
+        throw error;
+      }
+      
+      if (successElement) successElement.textContent = 'Password reset email sent. Check your inbox.';
+      if (errorElement) errorElement.textContent = '';
+      
+    } catch (error) {
+      console.error('Password reset error:', error);
+      let errorMessage = 'Failed to send reset email. Please try again.';
+      
+      if (error.message) {
+        if (error.message.includes('Failed to fetch')) {
+          errorMessage = 'Network error. Please check your connection.';
         } else {
-          if (successElement) successElement.textContent = 'Password reset email sent. Check your inbox.';
-          if (errorElement) errorElement.textContent = '';
+          errorMessage = error.message;
         }
-      });
+      }
+      
+      if (errorElement) errorElement.textContent = errorMessage;
+      if (successElement) successElement.textContent = '';
+    }
   }
 };
 
@@ -2192,7 +2280,11 @@ const authManager = {
 document.addEventListener('DOMContentLoaded', function () {
   // Load data from localStorage immediately
   dataManager.loadDataFromLocalStorage();
-
+  
+  // Add online/offline event listeners
+  window.addEventListener('online', uiManager.handleOnlineStatus);
+  window.addEventListener('offline', uiManager.handleOfflineStatus);
+  
   // Check if user is already authenticated
   supabase.auth.getSession().then(({ data: { session } }) => {
     if (session) {
@@ -2200,22 +2292,18 @@ document.addEventListener('DOMContentLoaded', function () {
       document.getElementById('loginScreen').style.display = 'none';
       document.getElementById('mainApp').style.display = 'block';
       uiManager.updateUserInfo(session.user);
-
+      
       // Initialize the app with already loaded data
       uiManager.initializeApp();
-
+      
       // Then try to sync with Supabase
       dataManager.loadDataFromSupabase();
-
-      // Set up online/offline listeners
-      window.addEventListener('online', uiManager.handleOnlineStatus);
-      window.addEventListener('offline', uiManager.handleOfflineStatus);
     } else {
       document.getElementById('loginScreen').style.display = 'flex';
       document.getElementById('mainApp').style.display = 'none';
     }
   });
-
+  
   // Login form
   const emailLoginForm = document.getElementById('emailLoginForm');
   if (emailLoginForm) {
@@ -2223,34 +2311,10 @@ document.addEventListener('DOMContentLoaded', function () {
       e.preventDefault();
       const email = document.getElementById('email').value;
       const password = document.getElementById('password').value;
-      const errorElement = document.getElementById('email-login-error');
-      const loginBtn = document.getElementById('emailLoginBtn');
-
-      if (loginBtn) {
-        loginBtn.disabled = true;
-        loginBtn.textContent = 'Signing In...';
-      }
-
-      supabase.auth.signInWithPassword({ email, password })
-        .then(({ data, error }) => {
-          if (error) {
-            if (errorElement) errorElement.textContent = error.message;
-            if (loginBtn) {
-              loginBtn.disabled = false;
-              loginBtn.textContent = 'Sign In';
-            }
-          }
-        })
-        .catch(error => {
-          if (errorElement) errorElement.textContent = error.message;
-          if (loginBtn) {
-            loginBtn.disabled = false;
-            loginBtn.textContent = 'Sign In';
-          }
-        });
+      authManager.signIn(email, password);
     });
   }
-
+  
   // Forgot password
   const forgotPasswordLink = document.getElementById('forgotPasswordLink');
   if (forgotPasswordLink) {
@@ -2260,15 +2324,24 @@ document.addEventListener('DOMContentLoaded', function () {
       if (forgotPasswordModal) forgotPasswordModal.classList.add('active');
     });
   }
-
+  
   // Logout
   const logoutBtn = document.getElementById('logoutBtn');
   if (logoutBtn) {
-    logoutBtn.addEventListener('click', function () {
-      supabase.auth.signOut();
+    logoutBtn.addEventListener('click', async function () {
+      try {
+        await supabase.auth.signOut();
+        currentUser = null;
+        document.getElementById('loginScreen').style.display = 'flex';
+        document.getElementById('mainApp').style.display = 'none';
+        utils.showNotification('Logged out successfully', 'success');
+      } catch (error) {
+        console.error('Logout error:', error);
+        utils.showNotification('Error logging out', 'error');
+      }
     });
   }
-
+  
   // Modal close buttons
   document.querySelectorAll('.js-modal-close').forEach(button => {
     button.addEventListener('click', () => {
@@ -2276,35 +2349,35 @@ document.addEventListener('DOMContentLoaded', function () {
       uiManager.closeModal(targetModal);
     });
   });
-
+  
   // Event Delegation for dynamic content
   setupEventDelegation();
-
+  
   // Modal confirm buttons
   const addItemConfirmBtn = document.querySelector('.js-add-item-confirm-btn');
   if (addItemConfirmBtn) addItemConfirmBtn.addEventListener('click', itemManager.addNewItem);
-
+  
   const addInventoryConfirmBtn = document.querySelector('.js-add-inventory-confirm-btn');
   if (addInventoryConfirmBtn) addInventoryConfirmBtn.addEventListener('click', itemManager.addNewInventory);
-
+  
   const addSupplierConfirmBtn = document.querySelector('.js-add-supplier-confirm-btn');
   if (addSupplierConfirmBtn) addSupplierConfirmBtn.addEventListener('click', supplierManager.addNewSupplier);
-
+  
   const addPurchaseOrderConfirmBtn = document.querySelector('.js-add-purchase-order-confirm-btn');
   if (addPurchaseOrderConfirmBtn) addPurchaseOrderConfirmBtn.addEventListener('click', purchaseOrderManager.addNewPurchaseOrder);
-
+  
   const updateInventoryBtn = document.querySelector('.js-update-inventory-btn');
   if (updateInventoryBtn) updateInventoryBtn.addEventListener('click', itemManager.updateInventoryItem);
-
+  
   const updateSupplierBtn = document.querySelector('.js-update-supplier-btn');
   if (updateSupplierBtn) updateSupplierBtn.addEventListener('click', supplierManager.updateSupplier);
-
+  
   const updatePurchaseOrderBtn = document.querySelector('.js-update-purchase-order-btn');
   if (updatePurchaseOrderBtn) updatePurchaseOrderBtn.addEventListener('click', purchaseOrderManager.updatePurchaseOrder);
-
+  
   const completeCheckoutBtn = document.querySelector('.js-complete-checkout-btn');
   if (completeCheckoutBtn) completeCheckoutBtn.addEventListener('click', cartManager.completeCheckout);
-
+  
   const resetPasswordBtn = document.querySelector('.js-reset-password-btn');
   if (resetPasswordBtn) resetPasswordBtn.addEventListener('click', authManager.resetPassword);
 });
@@ -2564,8 +2637,6 @@ supabase.auth.onAuthStateChange((event, session) => {
     document.getElementById('mainApp').style.display = 'block';
     uiManager.updateUserInfo(session.user);
     dataManager.loadDataFromSupabase();
-    window.addEventListener('online', uiManager.handleOnlineStatus);
-    window.addEventListener('offline', uiManager.handleOfflineStatus);
     uiManager.initializeApp();
   } else if (event === 'SIGNED_OUT') {
     currentUser = null;
@@ -2574,7 +2645,7 @@ supabase.auth.onAuthStateChange((event, session) => {
   }
 });
 
-// Register Service Worker
+// Register Service Worker with error handling
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', function () {
     navigator.serviceWorker.register('/sw.js')
@@ -2583,6 +2654,33 @@ if ('serviceWorker' in navigator) {
       })
       .catch(function (err) {
         console.log('ServiceWorker registration failed: ', err);
+        // Continue without service worker
       });
   });
 }
+
+// Create fallback icons if they don't exist
+function createFallbackIcons() {
+  // Create favicon if it doesn't exist
+  const favicon = document.querySelector('link[rel="icon"]');
+  if (!favicon || favicon.href.includes('favicon.ico') && favicon.href.includes(window.location.origin)) {
+    const link = document.createElement('link');
+    link.rel = 'icon';
+    link.href = 'data:image/x-icon;base64,AAABAAEAEBAAAAEAIABoBAAAFgAAACgAAAAQAAAAIAAAAAEAIAAAAAAAAAQAABILAAASCwAAAAAAAAAAAAD///8A////AP///wD///8A////AP///wD///8A////AP///wD///8A////AP///wD///8A////AP///wD///8A';
+    link.type = 'image/x-icon';
+    document.head.appendChild(link);
+  }
+  
+  // Create apple touch icon if it doesn't exist
+  const appleIcon = document.querySelector('link[rel="apple-touch-icon"]');
+  if (!appleIcon) {
+    const link = document.createElement('link');
+    link.rel = 'apple-touch-icon';
+    link.href = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAACXBIWXMAAAsTAAALEwEAmpwYAAAKT2lDQ1BQaG90b3Nob3AgSUNDIHByb2ZpbGUAAHjanVNnVFPpFj333vRCS4iAlEtvUhUIIFJCi4AUkSYqIQkQSoghodkVUcERRUUEG8igiAOOjoCMFVEsDIoK2AfkIaKOg6OIisr74Xuja9a89+bN/rXXPues852zzwfACAyWSDNRNYAMq+e7lMmJ2mmSvIazj9e7Tf6mLAaCCgJAJT7KPqZAAAAAElFTkSuQmCC';
+    link.type = 'image/png';
+    document.head.appendChild(link);
+  }
+}
+
+// Call createFallbackIcons on load
+createFallbackIcons();
